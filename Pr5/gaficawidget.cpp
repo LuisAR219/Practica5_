@@ -2,51 +2,122 @@
 #include <QPainter>
 #include <QFile>
 #include <QTextStream>
-#include <QRegularExpression>
 #include <QStringList>
+#include <map>
+#include <QDebug>
 
 GraficaWidget::GraficaWidget(QWidget *parent) : QWidget(parent) {}
 
+void GraficaWidget::setObstaculos(const std::vector<Rectangulo>& obs)
+{
+    m_obstaculos = obs;
+    update();
+}
+
 void GraficaWidget::cargarArchivo(const QString &archivo)
 {
+    // Reset data
     m_tray.clear();
-    m_cols.clear();
+    m_colsByStep.clear();
+    m_obstaculos.clear();
     m_pasoMax = 0;
     m_pasoAct = 0;
 
     QFile f(archivo);
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        qWarning() << "No se pudo abrir" << archivo;
+        return;
+    }
+
     QTextStream in(&f);
 
-    std::vector<QPointF> aux[3];          // 3 partículas
+    // frames[paso] = vector posiciones de partículas
+    std::vector<std::vector<QPointF>> frames;
+    std::map<int, std::vector<QPointF>> collisionsMap;
+
+    int currentStep = -1;
+
     while (!in.atEnd()) {
         QString line = in.readLine().trimmed();
-        if (line.startsWith("Paso")) continue;
+        if (line.isEmpty()) continue;
 
-        if (line.startsWith("COLISION")) {
-            QStringList p = line.split(' ');
-            if (p.size() >= 5)
-                m_cols.push_back({p[2].toDouble(), p[3].toDouble()}); // push_back
+        // PASO
+        if (line.startsWith("Paso")) {
+            QStringList parts = line.split(' ', Qt::SkipEmptyParts);
+
+            if (parts.size() >= 2) {
+                bool ok = false;
+                int p = parts[1].toInt(&ok);
+                currentStep = ok ? p : (int)frames.size();
+            } else {
+                currentStep = (int)frames.size();
+            }
+
+            frames.emplace_back();
             continue;
         }
 
-        QStringList xy = line.split(' ');
-        if (xy.size() != 2) continue;
-        double x = xy[0].toDouble();
-        double y = xy[1].toDouble();
+        // COLISIONES
+        if (line.startsWith("COLISION")) {
+            QStringList p = line.split(' ', Qt::SkipEmptyParts);
 
-        // Reparte entre los 3 vectores auxiliares
-        if (aux[0].size() == aux[1].size() && aux[0].size() == aux[2].size())
-            aux[0].push_back({x, y});
-        else if (aux[1].size() < aux[0].size())
-            aux[1].push_back({x, y});
-        else
-            aux[2].push_back({x, y});
+            if (p.size() >= 5) {
+                bool okS=false, okX=false, okY=false;
+                int step = p[2].toInt(&okS);
+                double x = p[3].toDouble(&okX);
+                double y = p[4].toDouble(&okY);
+
+                if (okS && okX && okY)
+                    collisionsMap[step].push_back(QPointF(x,y));
+            }
+            continue;
+        }
+
+        // POSICIONES "x y"
+        QStringList xy = line.split(' ', Qt::SkipEmptyParts);
+        if (xy.size() != 2) continue;
+
+        bool okX=false, okY=false;
+        double x = xy[0].toDouble(&okX);
+        double y = xy[1].toDouble(&okY);
+        if (!okX || !okY) continue;
+
+        if (frames.empty()) {
+            frames.emplace_back();
+            currentStep = 0;
+        }
+
+        frames.back().push_back(QPointF(x,y));
     }
+
     f.close();
 
-    m_tray = {aux[0], aux[1], aux[2]};
-    m_pasoMax = m_tray.empty() ? 0 : static_cast<int>(m_tray[0].size()) - 1;
+    // No hay datos
+    if (frames.empty()) {
+        update();
+        return;
+    }
+
+    // Construir trayectorias
+    size_t nPart = frames[0].size();
+    for (auto &fr : frames)
+        nPart = std::min(nPart, fr.size());
+
+    m_tray.assign(nPart, std::vector<QPointF>());
+
+    for (auto &fr : frames)
+        for (size_t i = 0; i < nPart; ++i)
+            m_tray[i].push_back(fr[i]);
+
+
+    m_colsByStep.assign(frames.size(), {});
+    for (auto &kv : collisionsMap)
+        if (kv.first >= 0 && kv.first < (int)m_colsByStep.size())
+            m_colsByStep[kv.first] = kv.second;
+
+    m_pasoMax = frames.size() - 1;
+    m_pasoAct = 0;
+
     update();
 }
 
@@ -61,31 +132,58 @@ void GraficaWidget::paintEvent(QPaintEvent *)
     QPainter painter(this);
     painter.fillRect(rect(), Qt::black);
 
-
-    // Proporción 800×600
+    // Mapa lógico
     const double worldW = 800.0;
     const double worldH = 600.0;
+
     double scale = std::min(width() / worldW, height() / worldH);
     double offsetX = (width()  - worldW * scale) / 2.0;
     double offsetY = (height() - worldH * scale) / 2.0;
 
-    auto toScreen = [&](const QPointF &l) -> QPointF {
-        return QPointF(l.x() * scale + offsetX, l.y() * scale + offsetY);
+    auto toScreen = [&](QPointF p) {
+        return QPointF(p.x() * scale + offsetX,
+                       p.y() * scale + offsetY);
     };
 
-    // Trayectorias
-    QColor colores[3] = {Qt::yellow, Qt::cyan, Qt::magenta};
-    for (int i = 0; i < 3 && i < static_cast<int>(m_tray.size()); ++i) {
-        QPen pen(colores[i]);
-        painter.setPen(pen);
-        for (int k = 1; k <= m_pasoAct && k < static_cast<int>(m_tray[i].size()); ++k)
-            painter.drawLine(toScreen(m_tray[i][k - 1]),
-                             toScreen(m_tray[i][k]));
+
+    painter.setPen(QPen(Qt::green, 2));
+    painter.setBrush(Qt::NoBrush);
+
+    for (const auto &r : m_obstaculos) {
+        QRectF rect(
+            r.x * scale + offsetX,
+            r.y * scale + offsetY,
+            r.ancho * scale,
+            r.alto * scale
+            );
+        painter.drawRect(rect);
     }
 
-    // Colisiones (mismo sistema)
-    painter.setPen(QPen(Qt::red, 0));
+
+    QColor colores[3] = { Qt::yellow, Qt::cyan, Qt::magenta };
+
+    for (int i = 0; i < (int)m_tray.size(); ++i) {
+        QPen pen = (i < 3 ? QPen(colores[i]) : QPen(Qt::white));
+        painter.setPen(pen);
+
+        for (int k = 1; k <= m_pasoAct && k < (int)m_tray[i].size(); ++k)
+            painter.drawLine(toScreen(m_tray[i][k-1]),
+                             toScreen(m_tray[i][k]));
+
+        if (m_pasoAct < (int)m_tray[i].size()) {
+            painter.setBrush(pen.color());
+            painter.drawEllipse(toScreen(m_tray[i][m_pasoAct]), 4, 4);
+        }
+    }
+
+    painter.setPen(QPen(Qt::red));
     painter.setBrush(Qt::red);
-    for (const QPointF &c : m_cols)
-        painter.drawEllipse(toScreen(c), 4, 4);
+
+    if (m_pasoAct >= 0 && m_pasoAct < (int)m_colsByStep.size()) {
+        for (auto &c : m_colsByStep[m_pasoAct])
+            painter.drawEllipse(toScreen(c), 5, 5);
+    }
 }
+
+
+

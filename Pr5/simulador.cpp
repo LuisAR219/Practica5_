@@ -106,14 +106,16 @@ void Simulador::verificarColisionesObstaculos(int step)
             if (colisionCirculoRectangulo(p, obs.rect))
             {
                 Vector2D normal = obtenerNormalRectangulo(p, obs.rect);
-                double vNormal  = p.vel.x * normal.x + p.vel.y * normal.y;
-                if (vNormal < 0)   // solo impacto entrante
-                {
-                    // ESCRIBIMOS antes de tocar velocidad
-                    archivoSalida << "COLISION OBST " << step
-                                  << " " << p.pos.x << " " << p.pos.y << '\n';
+                double vNormal = p.vel.x * normal.x + p.vel.y * normal.y;
 
-                    // Aplicamos restitución
+                if (vNormal < 0) // solo impacto entrante
+                {
+                    double xCol = p.pos.x;
+                    double yCol = p.pos.y;
+                    archivoSalida << "COLISION OBST " << step
+                                  << " " << xCol << " " << yCol << '\n';
+
+                    // Aplicar restitución
                     p.vel.x -= (1 + obs.coefRestitucion) * vNormal * normal.x;
                     p.vel.y -= (1 + obs.coefRestitucion) * vNormal * normal.y;
                 }
@@ -130,6 +132,7 @@ void Simulador::verificarColisionesParticulas(int step)
         {
             Particula &p1 = particulas[i];
             Particula &p2 = particulas[j];
+
             double dx = p1.pos.x - p2.pos.x;
             double dy = p1.pos.y - p2.pos.y;
             double dist = std::sqrt(dx * dx + dy * dy);
@@ -137,27 +140,26 @@ void Simulador::verificarColisionesParticulas(int step)
             if (dist < p1.radio + p2.radio)
             {
                 double masaTotal = p1.masa + p2.masa;
+
                 double vx = (p1.masa * p1.vel.x + p2.masa * p2.vel.x) / masaTotal;
                 double vy = (p1.masa * p1.vel.y + p2.masa * p2.vel.y) / masaTotal;
 
-                // Centro de masa (coordenadas lógicas)
+                // Centro de masa (ANTES de modificar)
                 double newX = (p1.masa * p1.pos.x + p2.masa * p2.pos.x) / masaTotal;
                 double newY = (p1.masa * p1.pos.y + p2.masa * p2.pos.y) / masaTotal;
-                double newR = std::sqrt(p1.radio * p1.radio + p2.radio * p2.radio);
 
-                // ESCRIBIMOS antes de modificar
                 archivoSalida << "COLISION PP " << step
                               << " " << newX << " " << newY << '\n';
 
-                // Fusionamos en la partícula i
+                // Fusionar en p1
                 p1.pos.x = newX;
                 p1.pos.y = newY;
                 p1.vel.x = vx;
                 p1.vel.y = vy;
-                p1.masa  = masaTotal;
-                p1.radio = newR;
+                p1.masa = masaTotal;
+                p1.radio = std::sqrt(p1.radio * p1.radio + p2.radio * p2.radio);
 
-                // Eliminamos la partícula j
+                // Eliminar p2
                 particulas.erase(particulas.begin() + j);
                 --j;
             }
